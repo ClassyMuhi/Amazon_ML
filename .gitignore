@@ -1,0 +1,17 @@
+# Dataset files
+*.tsv
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Generated files
+models/
+output/
+
+# Environment
+.env
+
+# Jupyter
+.ipynb_checkpoints/
