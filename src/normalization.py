@@ -356,6 +356,80 @@ def extract_numbers(address: Any) -> List[str]:
     return nums
 
 
+# Street, thoroughfare, and route suffixes/words indicating that a preceding number
+# is a street address / building / house number rather than a postal code.
+STREET_WORDS = {
+    "road", "rd", "street", "st", "str", "avenue", "ave", "av",
+    "drive", "dr", "lane", "ln", "highway", "hwy", "boulevard", "blvd",
+    "court", "ct", "way", "place", "pl", "terrace", "ter", "terr",
+    "trail", "trl", "route", "rte", "rt", "circle", "cir",
+    "parkway", "pkwy", "pky", "loop", "lp", "loip", "square", "sq",
+    "alley", "aly", "crescent", "cres", "crossing", "xing", "run",
+    "walk", "row", "path", "turnpike", "tpke", "tpk", "expressway",
+    "expy", "expw", "freeway", "fwy", "causeway", "cswy", "broadway",
+    "pass", "passage", "trace", "trce", "bend", "glen", "ridge", "rdg",
+    "cove", "cv", "hill", "hills", "hl", "hls", "cross", "bypass",
+    "byp", "plaza", "plz", "gardens", "gdn", "gdns", "grove", "grv",
+    "mews", "close", "cl", "point", "pt", "rise", "view", "vw",
+    "valley", "vly", "station", "stn", "parade", "pde", "walkway",
+    "mall", "promenade", "esplanade", "quay", "wharf", "overpass",
+    "extension", "ext", "roadways", "express", "gali", "marg", "rasta",
+    "nagar", "colony", "enclave",
+}
+
+# Unit, plot, building, phone, or door prefixes that indicate a numeric code is a
+# building, house, unit, or phone number rather than a postal code.
+UNIT_PREFIXES = {
+    "no", "no.", "h.no", "h.no.", "hn", "house", "door", "flat",
+    "plot", "site", "shop", "shp", "unit", "suite", "ste", "apt",
+    "apartment", "bldg", "building", "room", "rm", "fl", "floor",
+    "block", "blk", "sector", "sec", "ph", "phone", "tel", "cell",
+    "mob", "mobile", "box", "po", "pmb", "dept", "department",
+    "khasra", "kh", "survey", "sr", "w.no", "ward",
+}
+
+
+def is_street_or_building_number(addr: str, start: int, end: int) -> bool:
+    """
+    Determines whether a numeric candidate in an address is actually a street/house/unit number.
+    Checks:
+    1. Preceding unit/building prefixes (e.g. 'No 00925', 'H.N. 04162', 'Suite 100').
+    2. Starting position (unlabeled numbers at the beginning of an address are street numbers).
+    3. Following street words (e.g. '17160 Presbyterian Road', '34233 River Rd').
+    """
+    prefix_text = addr[:start].strip()
+    if prefix_text:
+        pre_words = re.findall(r"[a-zA-Z0-9.]+", prefix_text)
+        if pre_words:
+            last_word = pre_words[-1].lower().rstrip(".-#")
+            if last_word in UNIT_PREFIXES:
+                return True
+            if len(pre_words) >= 2:
+                two_word = f"{pre_words[-2].lower()} {last_word}"
+                if two_word in {
+                    "house no", "door no", "plot no", "flat no",
+                    "shop no", "po box", "h no", "d no", "ward no",
+                }:
+                    return True
+
+    # Token 0 check: unlabeled numbers at the very beginning of an address
+    if not prefix_text or re.fullmatch(r"[\s#,-]*", prefix_text):
+        remainder = addr[end:].strip()
+        if remainder:
+            return True
+
+    # Following context check: look at words following the candidate number
+    suffix_text = addr[end:].strip()
+    if suffix_text:
+        post_words = [w.lower().strip(".,;:-()[]") for w in suffix_text.split()[:5]]
+        post_words = [w for w in post_words if w]
+        for w in post_words:
+            if w in STREET_WORDS:
+                return True
+
+    return False
+
+
 def extract_postal_code(
     address: Any, country: Optional[str] = None
 ) -> str:
@@ -364,12 +438,13 @@ def extract_postal_code(
     Supports international formats without restricting or hard-coding country assumptions.
 
     Detects:
-    - 5-digit US ZIP with optional +4 extension (e.g. '90210', '90210-1234')
-    - 6-digit Indian PIN codes (e.g. '600001', '530003')
-    - 5-digit French/European postal codes (e.g. '75008', '33000')
+    - 5-digit US ZIP with optional +4 extension (e.g. '90210-1234')
+    - 6-digit PIN codes with surrounding postal context (e.g. 'Chennai - 600001', 'PIN 560001')
+    - 5-digit postal codes placed after state/locality or at end of address (e.g. 'CA 92399', 'Paris, 75008')
     - Alphanumeric postal codes (e.g. 'SW1A 1AA', 'H3Z 2Y7')
 
-    Distinguishes postal codes from leading street numbers (e.g. '33466 Warwick Hills').
+    Strictly avoids false positives by distinguishing postal codes from street/building numbers
+    (e.g. '17160 Presbyterian Road', '10500 Bergtold Road', '23037 Olympia Drive', '34233 River Rd').
 
     Args:
         address: Raw or normalized address string.
@@ -389,36 +464,74 @@ def extract_postal_code(
     # 1. 5-digit US ZIP+4 pattern (e.g. '90210-1234')
     m = re.search(r"\b(\d{5}-\d{4})\b", addr)
     if m:
-        return m.group(1)
+        if not is_street_or_building_number(addr, m.start(1), m.end(1)):
+            return m.group(1)
 
-    # 2. 6-digit PIN code (e.g. '600001', '530003')
-    # Standard PIN codes begin with non-zero digit
-    m = re.search(r"\b([1-9]\d{5})\b", addr)
+    # 2. Explicit postal code label (e.g. 'PIN: 600001', 'ZIP 90210', 'Postal Code 75008')
+    m = re.search(
+        r"(?i)\b(?:pin\s*code|pincode|pin|postal\s*code|postal|zip\s*code|zipcode|zip)\s*[:#-]?\s*([A-Za-z0-9\s-]{3,10})\b",
+        addr,
+    )
     if m:
-        return m.group(1)
+        candidate = m.group(1).strip()
+        if re.fullmatch(r"\d{5}(?:-\d{4})?", candidate):
+            return candidate
+        if re.fullmatch(r"[1-9]\d{5}", candidate):
+            return candidate
+        if re.fullmatch(r"[A-Za-z]\d[A-Za-z][ -]?\d[A-Za-z]\d", candidate):
+            return candidate.replace(" ", "").upper()
+        if re.fullmatch(r"[A-Za-z]{1,2}\d[A-Za-z\d]?\s*\d[A-Za-z]{2}", candidate):
+            return candidate.upper()
 
-    # 3. Alphanumeric postal code (e.g. Canadian / UK 'A1A 1A1' or 'SW1A 1AA')
+    # 3. Alphanumeric postal codes (e.g. Canadian 'H3Z 2Y7', UK 'SW1A 1AA')
+    # Canadian: letter-digit-letter digit-letter-digit
     m = re.search(r"\b([A-Za-z]\d[A-Za-z][ -]?\d[A-Za-z]\d)\b", addr)
     if m:
-        return m.group(1).replace(" ", "").upper()
+        if not is_street_or_building_number(addr, m.start(1), m.end(1)):
+            return m.group(1).replace(" ", "").upper()
 
-    # 4. 5-digit postal code preceded by state abbreviation or comma (e.g. 'TX 75201', 'Paris, 75008')
-    m = re.search(r"(?:[A-Za-z]{2}|,)\s*(\d{5})\b", addr)
+    # UK format: e.g. 'SW1A 1AA', 'EC1A 1BB'
+    m = re.search(r"\b([A-Z]{1,2}\d[A-Z\d]?\s+\d[A-Z]{2})\b", addr)
     if m:
-        return m.group(1)
+        if not is_street_or_building_number(addr, m.start(1), m.end(1)):
+            return m.group(1).upper()
 
-    # 5. 5-digit code located at the very end of the address
-    m = re.search(r"\b(\d{5})$", addr)
+    # 4. 6-digit postal code (e.g. Indian PIN codes: '600001', '530003')
+    # Must have supportive postal context (separator like '-', ',', or end of address)
+    # and strictly not be a street/building number.
+    for m in re.finditer(r"\b([1-9]\d{5})\b", addr):
+        start, end = m.start(1), m.end(1)
+        if is_street_or_building_number(addr, start, end):
+            continue
+        pre_char = addr[:start].rstrip()
+        post_char = addr[end:].lstrip()
+        if pre_char.endswith(("-", ",")):
+            return m.group(1)
+        if not post_char or re.fullmatch(r",?\s*(?:India|IN|Bharat)?", post_char, re.I):
+            return m.group(1)
+
+    # 5. 5-digit postal code preceded by 2-letter state code or separator (e.g. 'CA 92399', 'Paris, 75008')
+    for m in re.finditer(r"(?:\b([A-Z]{2})\s+|,\s*|-\s*)\b(\d{5})\b", addr):
+        code = m.group(2)
+        start, end = m.start(2), m.end(2)
+        if code.startswith("00"):
+            continue
+        if is_street_or_building_number(addr, start, end):
+            continue
+        post_text = addr[end:].strip()
+        if not post_text or re.fullmatch(r",?\s*(?:USA?|United States|US)?", post_text, re.I):
+            return code
+        first_post_word = post_text.split()[0].strip(".,;") if post_text.split() else ""
+        if first_post_word and first_post_word.isalpha() and first_post_word.lower() not in STREET_WORDS:
+            return code
+
+    # 6. 5-digit code located at the very end of the address
+    m = re.search(r"(?:[A-Za-z]{2,}|,|-)\s*(\d{5})$", addr)
     if m:
-        return m.group(1)
-
-    # 6. Fallback: 5-digit number that is not at the very start of the address
-    # (prevents house numbers like '33466 Warwick Hills Road' from being misidentified)
-    tokens = addr.split()
-    for tok in tokens[1:]:
-        clean_tok = tok.strip(".,;:()[]-")
-        if re.fullmatch(r"\d{5}", clean_tok):
-            return clean_tok
+        code = m.group(1)
+        start, end = m.start(1), m.end(1)
+        if not code.startswith("00") and not is_street_or_building_number(addr, start, end):
+            return code
 
     return ""
 

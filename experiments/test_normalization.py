@@ -80,7 +80,64 @@ def run_tests():
     assert zip_addr4 == "600001", f"Failed postal code extraction: {zip_addr4}"
     print("  [PASS] Correctly extracted numbers ['12', '600001'] and PIN '600001'")
 
-    # 2. Missing Values (NaN, None, empty string, whitespace)
+    # 2B. Postal Code Extraction & False Positive Rejection
+    print("\n[TEST 2B] Postal Code Extraction & Street Number False-Positive Rejection:")
+    postal_false_positives = [
+        # User specified test cases
+        ("17160 Presbyterian Road", ""),
+        ("10500 Bergtold Road", ""),
+        ("23037 Olympia Drive", ""),
+        ("34233 River Rd", ""),
+        # Dataset sample cases
+        ("WI, Town Of Townsend, 17160 Presbyterian Road", ""),
+        ("Unit Suite 235, 10500 Bergtold Road, NY, Clarence", ""),
+        ("VA, 23037 Olympia Drive, Loudoun County", ""),
+        ("Long Neck, 34233 River Rd, Delaware", ""),
+        ("445243 995 Road, Gore, OK", ""),
+        ("Unit STE A-07, Bedford County, VA, 18013 Forest Road", ""),
+        ("Grove, NY, 11852 16", ""),
+        ("OK, Spiro, 24062 Tucker Road", ""),
+        ("Katy, TX, 21342 Bending Green Way", ""),
+        ("OH, 12313 REXFORD AVE, CLEVELAND", ""),
+        ("NO 00925 APARTMENT D-26, BANGALORE, Karnataka", ""),
+        ("PRINCE WILLIAM COUNTY, VA, 11261 LADY JANE LOIP", ""),
+        ("AR, HETH, 00148 ST FRANCIS 519 ROAD", ""),
+        ("OK, 18987 4185 Rd, CLAREMORE", ""),
+        ("NY, 01080 87, CATSKILL", ""),
+        ("NULL, 18611 EACH ELM WAY, TX, HOSTON", ""),
+        ("H.N. 04162, SECTOR D, PKT, VASANT KUNJ, SOUTH DELHI, Delhi", ""),
+        ("NEW DELHI, Delhi, 00311", ""),
+        ("BIG LAKE, 25412 167 1/2 ST, MN", ""),
+        ("NOBLESVILLE, 15769 EXPLORATION BLVD, IN", ""),
+        ("Edwall, Washington, 29511 Tucker Prairie Rd", ""),
+        ("Phoenix, AZ, 16007 45th Street", ""),
+        ("Washington, Kent, 18223 286th Ct", ""),
+        ("Texas, 14659 Coffee Ln, Scurry", ""),
+    ]
+    for raw_a, exp_code in postal_false_positives:
+        code = extract_postal_code(raw_a)
+        assert code == exp_code, f"False positive detected: {raw_a!r} -> got {code!r}, expected {exp_code!r}"
+    print("  [PASS] All street/building numbers correctly rejected (postal_code == '')")
+
+    # Genuine postal codes
+    genuine_postal_cases = [
+        ("12, M.G. Road, Chennai - 600001", "600001"),
+        ("33466 Warwick Hills Road, Yucaipa, CA 92399", "92399"),
+        ("3315 FREMONT ST, PEORIA, IL 61602", "61602"),
+        ("PO Box 90210, Beverly Hills, CA 90210-1234", "90210-1234"),
+        ("10 Downing St, London SW1A 2AA, UK", "SW1A 2AA"),
+        ("1425 Rue Chabanel O, Montréal, QC H4N 2S7", "H4N2S7"),
+        ("24 Rue de la Paix, 75008 Paris", "75008"),
+        ("Near Bus Stand, PIN Code: 560001, Bangalore", "560001"),
+        ("Austin, TX 78701, USA", "78701"),
+        ("Plot 42, Sector 18, Gurgaon - 122001", "122001"),
+    ]
+    for raw_a, exp_code in genuine_postal_cases:
+        code = extract_postal_code(raw_a)
+        assert code == exp_code, f"Genuine postal code failed: {raw_a!r} -> got {code!r}, expected {exp_code!r}"
+    print("  [PASS] Genuine postal codes correctly extracted (US ZIP, ZIP+4, PIN, UK, Canada, France)")
+
+    # 3. Missing Values (NaN, None, empty string, whitespace)
     print("\n[TEST 3] Missing / Null Value Handling:")
     for null_val in [None, float("nan"), "", "   "]:
         assert normalize_text(null_val) == "", f"Failed on {null_val!r}"
