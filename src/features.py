@@ -197,10 +197,17 @@ def compute_pair_features(
     Returns:
         DataFrame containing candidate IDs and 12 numerical feature columns.
     """
+    # Detect target entity ID column name in candidates_df
+    target_cand_col = (
+        "target_entity_id"
+        if "target_entity_id" in candidates_df.columns
+        else "candidate_entity_id"
+    )
+
     if candidates_df.empty:
         cols = [
             "source1_entity_id",
-            "candidate_entity_id",
+            target_cand_col,
             "name_levenshtein_ratio",
             "name_jaro_winkler",
             "core_name_levenshtein_ratio",
@@ -232,7 +239,7 @@ def compute_pair_features(
 
     for pair in candidates_df.itertuples(index=False):
         s1_id = getattr(pair, "source1_entity_id")
-        target_id = getattr(pair, "candidate_entity_id")
+        target_id = getattr(pair, target_cand_col)
 
         if s1_id not in s1_dict or target_id not in target_dict:
             continue
@@ -291,7 +298,7 @@ def compute_pair_features(
 
         row_dict = {
             "source1_entity_id": s1_id,
-            "candidate_entity_id": target_id,
+            target_cand_col: target_id,
             "name_levenshtein_ratio": feat_name_lev,
             "name_jaro_winkler": feat_name_jw,
             "core_name_levenshtein_ratio": feat_core_lev,
@@ -310,7 +317,7 @@ def compute_pair_features(
     if not feature_rows:
         cols = [
             "source1_entity_id",
-            "candidate_entity_id",
+            target_cand_col,
             "name_levenshtein_ratio",
             "name_jaro_winkler",
             "core_name_levenshtein_ratio",

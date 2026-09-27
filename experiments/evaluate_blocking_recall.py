@@ -1,173 +1,461 @@
 """
-Evaluation script for testing improved src/blocking.py against ground-truth matches
-for the 1,000-row sample from train_source1.tsv.
+Memory-safe blocking recall evaluation.
+
+Evaluates the existing blocking logic on a representative subset of
+the training dataset against the corresponding ground-truth matches.
+
+IMPORTANT:
+This is a diagnostic experiment, not the final training pipeline.
 """
 
 import sys
 import time
-import re
 from pathlib import Path
+
 import pandas as pd
 
-sys.stdout.reconfigure(encoding="utf-8")
-sys.stdout.reconfigure(line_buffering=True)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent if "PROJECT_ROOT" not in globals() else PROJECT_ROOT
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.blocking import generate_candidate_pairs
 from src.normalization import add_normalized_features
+from src.blocking import generate_candidate_pairs
 
 
-# 10 previously shown missed pairs from baseline evaluation
-PREVIOUS_10_MISSED_PAIRS = [
-    ("S1-552720726", "S2-524158368"),  # Pae ZX Chit Limited
-    ("S1-211026051", "S2-160973668"),  # Ariabrix vs Gandhinagar Trading
-    ("S1-823731657", "S3-112268045"),  # clitaxable.com vs CLI Taxable LLC
-    ("S1-436985273", "S3-150259143"),  # cornerpilates.com vs Corner Pilates
-    ("S1-335752330", "S2-897778962"),  # rannabrillcertified.com
-    ("S1-562989120", "S2-358084731"),  # Smt Acp Plus Private
-    ("S1-317952287", "S2-106588037"),  # ಹೈ ಫುಡ್ ಎಲ್ಎಲ್‌ಪಿ (Kannada)
-    ("S1-578641214", "S3-92912454"),   # 5bi-Traders vs Sbi Traders
-    ("S1-630223771", "S3-815538600"),  # ऑल इंटरनेशनल एलएलपी (Hindi)
-    ("S1-578641214", "S2-824570205"),  # Sri sbi traders private private limited
-]
+# ---------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------
 
-PREVIOUS_BASELINE_CANDIDATES = 5336388
+S1_SAMPLE_SIZE = 10_000
+TARGET_SAMPLE_SIZE = 100_000
+GT_CHUNK_SIZE = 250_000
+
+S1_PATH = PROJECT_ROOT / "dataset/train/train_source1.tsv"
+S2_PATH = PROJECT_ROOT / "dataset/train/train_source2.tsv"
+S3_PATH = PROJECT_ROOT / "dataset/train/train_source3.tsv"
+GT_PATH = PROJECT_ROOT / "dataset/train/train_ground_truth.tsv"
+
+OUTPUT_DIR = PROJECT_ROOT / "output"
+
+MISSED_PATH = OUTPUT_DIR / "blocking_missed_pairs_sample.tsv"
+CANDIDATE_PATH = OUTPUT_DIR / "blocking_candidates_sample.tsv"
 
 
-def evaluate_blocking_recall():
-    print("=======================================================", flush=True)
-    print("Evaluating Improved src/blocking.py on Ground Truth (1,000 S1 Sample)", flush=True)
-    print("=======================================================", flush=True)
+# ---------------------------------------------------------
+# Ground truth loader
+# ---------------------------------------------------------
 
-    train_s1_path = PROJECT_ROOT / "dataset/train/train_source1.tsv"
-    train_s2_path = PROJECT_ROOT / "dataset/train/train_source2.tsv"
-    train_s3_path = PROJECT_ROOT / "dataset/train/train_source3.tsv"
-    train_gt_path = PROJECT_ROOT / "dataset/train/train_ground_truth.tsv"
+def load_ground_truth_for_s1(s1_ids):
+    """
+    Load ground-truth pairs only for the sampled S1 entities.
+    """
 
-    if not train_s1_path.exists() or not train_gt_path.exists():
-        print("Error: Training dataset files not found!", flush=True)
-        return
+    s1_ids = set(s1_ids)
 
-    # 1. Load 1,000 S1 records
-    t0 = time.time()
-    print("Loading 1,000 S1 records...", flush=True)
-    df_s1 = pd.read_csv(train_s1_path, sep="\t", nrows=1000, dtype=str)
-    s1_set = set(df_s1["entity_id"].tolist())
-    s1_lookup = df_s1.set_index("entity_id").to_dict("index")
+    gt_pairs_s2 = set()
+    gt_pairs_s3 = set()
 
-    # 2. Load Ground Truth corresponding to those exact 1,000 S1 records
-    print("Loading Ground Truth matching those 1,000 S1 records...", flush=True)
-    matching_gt_chunks = []
-    for gt_chunk in pd.read_csv(train_gt_path, sep="\t", chunksize=500000, dtype=str):
-        sub = gt_chunk[gt_chunk["source1_entity_id"].isin(s1_set)]
-        if not sub.empty:
-            matching_gt_chunks.append(sub)
+    print("\nLoading ground truth...")
 
-    df_gt_correct = pd.concat(matching_gt_chunks, ignore_index=True)
+    for chunk in pd.read_csv(
+        GT_PATH,
+        sep="\t",
+        dtype=str,
+        chunksize=GT_CHUNK_SIZE,
+    ):
+        chunk = chunk[
+            chunk["source1_entity_id"].isin(s1_ids)
+        ]
 
-    gt_pairs = set()
-    gt_s2_ids = set()
-    gt_s3_ids = set()
-
-    for row in df_gt_correct.itertuples(index=False):
-        s1_id = getattr(row, "source1_entity_id")
-        matched_str = getattr(row, "matched_entity_ids")
-        if pd.isna(matched_str) or not matched_str or not str(matched_str).strip():
+        if chunk.empty:
             continue
-        matched_list = [m.strip() for m in str(matched_str).split(",") if m.strip()]
-        for target_id in matched_list:
-            gt_pairs.add((s1_id, target_id))
-            if target_id.startswith("S2-"):
-                gt_s2_ids.add(target_id)
-            elif target_id.startswith("S3-"):
-                gt_s3_ids.add(target_id)
 
-    total_gt_matches = len(gt_pairs)
-    print(f"Correct Ground-Truth matches loaded for 1,000 S1 records: {total_gt_matches}", flush=True)
-    print(f"  - S2 ground-truth matches: {len(gt_s2_ids)}", flush=True)
-    print(f"  - S3 ground-truth matches: {len(gt_s3_ids)}", flush=True)
+        for row in chunk.itertuples(index=False):
 
-    # Pre-normalize df_s1
-    df_s1_norm = add_normalized_features(df_s1)
-    s1_raw_countries = set(df_s1["country"].fillna("").astype(str).str.strip().unique())
+            s1_id = row.source1_entity_id
+            matched = row.matched_entity_ids
 
-    target_sources = [("S2", train_s2_path, gt_s2_ids), ("S3", train_s3_path, gt_s3_ids)]
-    all_generated_pairs = set()
-    target_lookup = {}
+            if pd.isna(matched):
+                continue
 
-    CHUNK_SIZE = 500000
+            matched = str(matched).strip()
 
-    for label, target_path, target_gt_ids in target_sources:
-        print(f"\nProcessing {label} dataset ({target_path.name})...", flush=True)
-        t_src = time.time()
-        chunk_candidates_count = 0
+            if not matched:
+                continue
 
-        for chunk_idx, chunk in enumerate(pd.read_csv(target_path, sep="\t", chunksize=CHUNK_SIZE, dtype=str)):
-            t_ch = time.time()
-            # Store target records that are in GT for detailed missed pair output
-            gt_rows = chunk[chunk["entity_id"].isin(target_gt_ids)]
-            if not gt_rows.empty:
-                for row_dict in gt_rows.to_dict("records"):
-                    target_lookup[row_dict["entity_id"]] = row_dict
+            for target_id in matched.split(","):
 
-            # Country filter
-            c_mask = chunk["country"].fillna("").astype(str).str.strip().isin(s1_raw_countries)
-            filtered_chunk = chunk[c_mask]
+                target_id = target_id.strip()
 
-            if not filtered_chunk.empty:
-                c_pairs = generate_candidate_pairs(df_s1_norm, filtered_chunk)
-                if not c_pairs.empty:
-                    for p in c_pairs.itertuples(index=False):
-                        all_generated_pairs.add((getattr(p, "source1_entity_id"), getattr(p, "candidate_entity_id")))
-                    chunk_candidates_count += len(c_pairs)
+                if not target_id:
+                    continue
 
-            print(f"  Chunk {chunk_idx+1} processed in {time.time() - t_ch:.2f}s (Cumulative candidates: {len(all_generated_pairs):,})", flush=True)
+                if target_id.startswith("S2-"):
+                    gt_pairs_s2.add(
+                        (s1_id, target_id)
+                    )
 
-        print(f"Finished {label}: generated {chunk_candidates_count:,} candidates in {time.time() - t_src:.2f}s", flush=True)
+                elif target_id.startswith("S3-"):
+                    gt_pairs_s3.add(
+                        (s1_id, target_id)
+                    )
 
-    total_candidates = len(all_generated_pairs)
-    avg_candidates_per_s1 = total_candidates / len(df_s1)
-    added_candidates = total_candidates - PREVIOUS_BASELINE_CANDIDATES
+    print(
+        f"Ground-truth S1→S2 pairs: {len(gt_pairs_s2):,}"
+    )
 
-    # 3. Compute Metrics
-    found_matches = gt_pairs & all_generated_pairs
-    missed_matches = gt_pairs - all_generated_pairs
+    print(
+        f"Ground-truth S1→S3 pairs: {len(gt_pairs_s3):,}"
+    )
 
-    found_count = len(found_matches)
-    missed_count = len(missed_matches)
-    blocking_recall = (found_count / total_gt_matches) if total_gt_matches > 0 else 0.0
+    return gt_pairs_s2, gt_pairs_s3
 
-    # 4. Print Exact Required Report
-    print("\n=======================================================", flush=True)
-    print("IMPROVED BLOCKING EVALUATION REPORT", flush=True)
-    print("=======================================================", flush=True)
-    print(f"1. Total ground-truth matches         : {total_gt_matches}", flush=True)
-    print(f"2. Ground-truth matches found        : {found_count}", flush=True)
-    print(f"3. Missed ground-truth matches        : {missed_count}", flush=True)
-    print(f"4. Blocking recall                    : {blocking_recall * 100:.2f}% ({found_count}/{total_gt_matches})", flush=True)
-    print(f"5. Total candidate pairs generated    : {total_candidates:,}", flush=True)
-    print(f"6. Average candidates per S1 entity   : {avg_candidates_per_s1:.2f}", flush=True)
-    print(f"7. Candidates added vs baseline       : {added_candidates:+,} pairs", flush=True)
 
-    # 8. Check Status of 10 Previously Shown Missed Pairs
-    print("\n-------------------------------------------------------", flush=True)
-    print("STATUS OF 10 PREVIOUSLY SHOWN MISSED PAIRS", flush=True)
-    print("-------------------------------------------------------", flush=True)
-    newly_found_count = 0
-    for idx, (s1_id, tid) in enumerate(PREVIOUS_10_MISSED_PAIRS, 1):
-        is_found = (s1_id, tid) in all_generated_pairs
-        status_str = "RECOVERED (FOUND)" if is_found else "STILL MISSED"
-        if is_found:
-            newly_found_count += 1
-        s1_info = s1_lookup.get(s1_id, {})
-        t_info = target_lookup.get(tid, {})
-        print(f"[{idx}] {status_str} -> S1: '{s1_info.get('business_name', '')}' <==> Target: '{t_info.get('business_name', '')}' ({tid})", flush=True)
+# ---------------------------------------------------------
+# Load target records required by ground truth
+# ---------------------------------------------------------
 
-    print(f"\nSummary of previously missed 10 pairs: {newly_found_count}/10 now recovered!", flush=True)
+def load_target_records(path, target_ids):
+    """
+    Read target TSV in chunks and keep only records whose IDs
+    occur in the sampled ground truth.
+
+    This avoids loading the complete 5M-row target dataset.
+    """
+
+    target_ids = set(target_ids)
+
+    pieces = []
+
+    print(f"\nFinding {len(target_ids):,} target records in:")
+    print(path.name)
+
+    for chunk in pd.read_csv(
+        path,
+        sep="\t",
+        dtype=str,
+        chunksize=GT_CHUNK_SIZE,
+    ):
+
+        sub = chunk[
+            chunk["entity_id"].isin(target_ids)
+        ]
+
+        if not sub.empty:
+            pieces.append(sub)
+
+    if not pieces:
+        return pd.DataFrame()
+
+    result = pd.concat(
+        pieces,
+        ignore_index=True,
+    )
+
+    print(
+        f"Loaded {len(result):,} required target records."
+    )
+
+    return result
+
+
+# ---------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------
+
+def evaluate_source(
+    source_name,
+    s1_df,
+    target_df,
+    ground_truth,
+):
+
+    print("\n" + "=" * 60)
+    print(f"EVALUATING S1 → {source_name}")
+    print("=" * 60)
+
+    if not ground_truth:
+        print("No ground-truth matches found.")
+        return set(), set()
+
+    start = time.time()
+
+    print("Normalizing S1 sample...")
+
+    s1_norm = add_normalized_features(s1_df)
+
+    print("Normalizing target records...")
+
+    target_norm = add_normalized_features(target_df)
+
+    print("Generating candidates...")
+
+    candidates = generate_candidate_pairs(
+        s1_norm,
+        target_norm,
+        target_label=source_name,
+    )
+
+    elapsed = time.time() - start
+
+    generated = set(
+        zip(
+            candidates["source1_entity_id"],
+            candidates["candidate_entity_id"],
+        )
+    )
+
+    found = ground_truth & generated
+    missed = ground_truth - generated
+
+    recall = (
+        len(found) / len(ground_truth)
+        if ground_truth
+        else 1.0
+    )
+
+    print("\nResults")
+    print("-" * 60)
+
+    print(
+        f"Ground-truth matches : {len(ground_truth):,}"
+    )
+
+    print(
+        f"Candidate pairs      : {len(generated):,}"
+    )
+
+    print(
+        f"Recovered matches    : {len(found):,}"
+    )
+
+    print(
+        f"Missed matches       : {len(missed):,}"
+    )
+
+    print(
+        f"Blocking recall      : {recall * 100:.2f}%"
+    )
+
+    print(
+        f"Candidates / S1     : "
+        f"{len(generated) / len(s1_df):.2f}"
+    )
+
+    print(
+        f"Runtime              : {elapsed:.2f} sec"
+    )
+
+    return generated, missed
+
+
+# ---------------------------------------------------------
+# Main
+# ---------------------------------------------------------
+
+def main():
+
+    print("=" * 60)
+    print("MEMORY-SAFE BLOCKING RECALL EVALUATION")
+    print("=" * 60)
+
+    print(f"S1 sample size     : {S1_SAMPLE_SIZE:,}")
+    print(f"Target sample size : {TARGET_SAMPLE_SIZE:,}")
+
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    # -----------------------------------------------------
+    # Load S1 sample
+    # -----------------------------------------------------
+
+    print("\nLoading S1 sample...")
+
+    s1_df = pd.read_csv(
+        S1_PATH,
+        sep="\t",
+        dtype=str,
+        nrows=S1_SAMPLE_SIZE,
+    )
+
+    print(
+        f"Loaded {len(s1_df):,} S1 records."
+    )
+
+    # -----------------------------------------------------
+    # Ground truth
+    # -----------------------------------------------------
+
+    gt_s2, gt_s3 = load_ground_truth_for_s1(
+        s1_df["entity_id"].tolist()
+    )
+
+    all_s2_ids = {
+        target_id
+        for _, target_id in gt_s2
+    }
+
+    all_s3_ids = {
+        target_id
+        for _, target_id in gt_s3
+    }
+
+    # -----------------------------------------------------
+    # Load only target records required for evaluation
+    # -----------------------------------------------------
+
+    s2_df = load_target_records(
+        S2_PATH,
+        all_s2_ids,
+    )
+
+    s3_df = load_target_records(
+        S3_PATH,
+        all_s3_ids,
+    )
+
+    # -----------------------------------------------------
+    # Evaluate S2
+    # -----------------------------------------------------
+
+    candidates_s2, missed_s2 = evaluate_source(
+        "S2",
+        s1_df,
+        s2_df,
+        gt_s2,
+    )
+
+    # -----------------------------------------------------
+    # Evaluate S3
+    # -----------------------------------------------------
+
+    candidates_s3, missed_s3 = evaluate_source(
+        "S3",
+        s1_df,
+        s3_df,
+        gt_s3,
+    )
+
+    # -----------------------------------------------------
+    # Save candidates
+    # -----------------------------------------------------
+
+    all_candidates = candidates_s2 | candidates_s3
+
+    if all_candidates:
+
+        candidate_df = pd.DataFrame(
+            list(all_candidates),
+            columns=[
+                "source1_entity_id",
+                "candidate_entity_id",
+            ],
+        )
+
+        candidate_df["target_source"] = (
+            candidate_df["candidate_entity_id"]
+            .str[:2]
+        )
+
+        candidate_df.to_csv(
+            CANDIDATE_PATH,
+            sep="\t",
+            index=False,
+        )
+
+    # -----------------------------------------------------
+    # Save misses
+    # -----------------------------------------------------
+
+    all_missed = missed_s2 | missed_s3
+
+    if all_missed:
+
+        missed_df = pd.DataFrame(
+            list(all_missed),
+            columns=[
+                "source1_entity_id",
+                "candidate_entity_id",
+            ],
+        )
+
+        missed_df["target_source"] = (
+            missed_df["candidate_entity_id"]
+            .str[:2]
+        )
+
+        missed_df.to_csv(
+            MISSED_PATH,
+            sep="\t",
+            index=False,
+        )
+
+    # -----------------------------------------------------
+    # Final summary
+    # -----------------------------------------------------
+
+    total_gt = len(gt_s2) + len(gt_s3)
+    total_missed = len(all_missed)
+    total_found = total_gt - total_missed
+
+    overall_recall = (
+        total_found / total_gt
+        if total_gt
+        else 1.0
+    )
+
+    print("\n" + "=" * 60)
+    print("FINAL BLOCKING RECALL SUMMARY")
+    print("=" * 60)
+
+    print(
+        f"S1 records evaluated : {len(s1_df):,}"
+    )
+
+    print(
+        f"S2 ground-truth      : {len(gt_s2):,}"
+    )
+
+    print(
+        f"S2 missed             : {len(missed_s2):,}"
+    )
+
+    print(
+        f"S3 ground-truth      : {len(gt_s3):,}"
+    )
+
+    print(
+        f"S3 missed             : {len(missed_s3):,}"
+    )
+
+    print(
+        f"Total ground-truth   : {total_gt:,}"
+    )
+
+    print(
+        f"Total recovered      : {total_found:,}"
+    )
+
+    print(
+        f"Total missed         : {total_missed:,}"
+    )
+
+    print(
+        f"Overall recall       : "
+        f"{overall_recall * 100:.2f}%"
+    )
+
+    print("\nOutput files:")
+
+    if CANDIDATE_PATH.exists():
+        print(f"  {CANDIDATE_PATH}")
+
+    if MISSED_PATH.exists():
+        print(f"  {MISSED_PATH}")
 
 
 if __name__ == "__main__":
-    evaluate_blocking_recall()
+    main()
