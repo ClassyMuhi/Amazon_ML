@@ -36,9 +36,20 @@ OUTPUT_DIR = "output"
 TRAINING_DIR = os.path.join(OUTPUT_DIR, "training")
 MODEL_DIR = "models"
 
-S1_FILE = os.path.join(TEST_DIR, "test_source1.tsv")
-S2_FILE = os.path.join(TEST_DIR, "test_source2.tsv")
-S3_FILE = os.path.join(TEST_DIR, "test_source3.tsv")
+S1_FILE = os.path.join(
+    TEST_DIR,
+    "test_source1.tsv",
+)
+
+S2_FILE = os.path.join(
+    TEST_DIR,
+    "test_source2.tsv",
+)
+
+S3_FILE = os.path.join(
+    TEST_DIR,
+    "test_source3.tsv",
+)
 
 MODEL_FILE = os.path.join(
     MODEL_DIR,
@@ -60,12 +71,21 @@ CANDIDATE_OUTPUT = os.path.join(
     "candidate_pairs.tsv",
 )
 
-# Conservative sizes for a 15 GB RAM machine.
+
+# ============================================================
+# CHUNK SETTINGS
+# ============================================================
+
 SOURCE1_CHUNK_SIZE = 5_000
 TARGET_CHUNK_SIZE = 50_000
 FEATURE_CHUNK_SIZE = 25_000
 
 DEFAULT_THRESHOLD = 0.78
+
+
+# ============================================================
+# FEATURES USED BY LIGHTGBM
+# ============================================================
 
 FEATURE_COLUMNS = [
     "name_levenshtein_ratio",
@@ -84,37 +104,71 @@ FEATURE_COLUMNS = [
 
 
 # ============================================================
-# HELPERS
+# HELPER: COUNT ROWS
 # ============================================================
 
 def count_rows(path):
-    """Count TSV data rows without loading the file."""
+    """
+    Count TSV data rows without loading the complete file.
+    """
 
-    with open(path, "rb") as f:
+    with open(
+        path,
+        "rb",
+    ) as f:
+
         count = 0
 
-        for chunk in iter(lambda: f.read(8 * 1024 * 1024), b""):
-            count += chunk.count(b"\n")
+        for chunk in iter(
+            lambda: f.read(
+                8 * 1024 * 1024
+            ),
+            b"",
+        ):
+            count += chunk.count(
+                b"\n"
+            )
 
     return count
 
 
-def load_threshold():
-    """Load optimized threshold."""
+# ============================================================
+# HELPER: LOAD THRESHOLD
+# ============================================================
 
-    if not os.path.exists(THRESHOLD_FILE):
+def load_threshold():
+    """
+    Load optimized validation threshold.
+
+    Expected:
+        output/training/threshold_metadata.json
+
+    Falls back to 0.78 if the file is unavailable.
+    """
+
+    if not os.path.exists(
+        THRESHOLD_FILE
+    ):
+
         print(
-            f"Threshold file not found. "
-            f"Using default {DEFAULT_THRESHOLD}"
+            "Threshold file not found."
         )
+
+        print(
+            f"Using default threshold: "
+            f"{DEFAULT_THRESHOLD}"
+        )
+
         return DEFAULT_THRESHOLD
 
     try:
+
         with open(
             THRESHOLD_FILE,
             "r",
             encoding="utf-8",
         ) as f:
+
             metadata = json.load(f)
 
         threshold = float(
@@ -125,48 +179,79 @@ def load_threshold():
         )
 
         print(
-            f"Loaded optimized threshold: {threshold:.2f}"
+            f"Loaded optimized threshold: "
+            f"{threshold:.2f}"
         )
 
         return threshold
 
     except Exception as exc:
+
         print(
             f"Could not load threshold: {exc}"
         )
+
         print(
-            f"Using default threshold "
+            f"Using default threshold: "
             f"{DEFAULT_THRESHOLD}"
         )
 
         return DEFAULT_THRESHOLD
 
 
-def load_model():
-    """Load trained LightGBM model."""
+# ============================================================
+# HELPER: LOAD MODEL
+# ============================================================
 
-    print("Loading LightGBM model...")
+def load_model():
+    """
+    Load trained LightGBM model.
+    """
+
+    print(
+        "Loading LightGBM model..."
+    )
+
+    if not os.path.exists(
+        MODEL_FILE
+    ):
+
+        raise FileNotFoundError(
+            f"LightGBM model not found: "
+            f"{MODEL_FILE}"
+        )
 
     model = lgb.Booster(
         model_file=MODEL_FILE
     )
 
-    print("LightGBM model loaded.")
+    print(
+        "LightGBM model loaded."
+    )
 
     return model
 
+
+# ============================================================
+# HELPER: READ TSV CHUNK
+# ============================================================
 
 def read_chunk(
     path,
     skiprows,
     nrows,
 ):
-    """Read a TSV chunk safely."""
+    """
+    Read a TSV chunk safely.
+    """
 
     return pd.read_csv(
         path,
         sep="\t",
-        skiprows=range(1, skiprows + 1),
+        skiprows=range(
+            1,
+            skiprows + 1,
+        ),
         nrows=nrows,
         dtype=str,
         keep_default_na=False,
@@ -174,14 +259,31 @@ def read_chunk(
     )
 
 
+# ============================================================
+# WRITE CANDIDATES
+# ============================================================
+
 def write_candidates(
     candidates,
     first_write,
 ):
-    """Append candidates to candidate_pairs.tsv."""
+    """
+    Append the exact generated candidate set.
+
+    Output format:
+
+        source1_entity_id
+        target_entity_id
+    """
 
     if candidates.empty:
+
         return first_write
+
+    # The existing blocker returns:
+    #
+    # source1_entity_id
+    # candidate_entity_id
 
     output = candidates[
         [
@@ -203,12 +305,20 @@ def write_candidates(
         CANDIDATE_OUTPUT,
         sep="\t",
         index=False,
-        mode="w" if first_write else "a",
+        mode=(
+            "w"
+            if first_write
+            else "a"
+        ),
         header=first_write,
     )
 
     return False
 
+
+# ============================================================
+# PREDICT CANDIDATES
+# ============================================================
 
 def predict_candidates(
     candidates,
@@ -221,16 +331,27 @@ def predict_candidates(
     Compute features and predict candidates.
 
     Returns:
-        dict:
-            source1_id -> set(target_id)
+
+        {
+            source1_id: {
+                target_id,
+                target_id,
+                ...
+            }
+        }
     """
 
     if candidates.empty:
+
         return {}
 
-    predictions = defaultdict(set)
+    predictions = defaultdict(
+        set
+    )
 
-    total = len(candidates)
+    total = len(
+        candidates
+    )
 
     for start in range(
         0,
@@ -243,9 +364,18 @@ def predict_candidates(
             total,
         )
 
+        print(
+            f"      Feature rows "
+            f"{start:,} - {end - 1:,}"
+        )
+
         batch = candidates.iloc[
             start:end
         ].copy()
+
+        # ----------------------------------------------------
+        # Compute pair features
+        # ----------------------------------------------------
 
         features = compute_pair_features(
             batch,
@@ -253,9 +383,32 @@ def predict_candidates(
             df_target,
         )
 
+        # ----------------------------------------------------
+        # Safety check
+        # ----------------------------------------------------
+
+        if features.empty:
+
+            del batch
+            del features
+
+            gc.collect()
+
+            continue
+
+        # ----------------------------------------------------
+        # Prepare model input
+        # ----------------------------------------------------
+
         X = features[
             FEATURE_COLUMNS
-        ].astype("float32")
+        ].astype(
+            "float32"
+        )
+
+        # ----------------------------------------------------
+        # LightGBM prediction
+        # ----------------------------------------------------
 
         probabilities = model.predict(
             X,
@@ -266,21 +419,66 @@ def predict_candidates(
             "prediction_probability"
         ] = probabilities
 
+        # ----------------------------------------------------
+        # Apply optimized threshold
+        # ----------------------------------------------------
+
         accepted = features[
             features[
                 "prediction_probability"
             ] >= threshold
         ]
 
+        # ----------------------------------------------------
+        # Extract accepted matches
+        # ----------------------------------------------------
+
         for row in accepted.itertuples(
             index=False
         ):
 
-            predictions[
-                row.source1_entity_id
-            ].add(
-                row.target_entity_id
+            source1_id = getattr(
+                row,
+                "source1_entity_id",
+                None,
             )
+
+            if source1_id is None:
+
+                continue
+
+            # Depending on the exact version of
+            # compute_pair_features(), the target
+            # identifier can appear under either
+            # name.
+
+            target_id = getattr(
+                row,
+                "target_entity_id",
+                None,
+            )
+
+            if target_id is None:
+
+                target_id = getattr(
+                    row,
+                    "candidate_entity_id",
+                    None,
+                )
+
+            if target_id is None:
+
+                continue
+
+            predictions[
+                source1_id
+            ].add(
+                target_id
+            )
+
+        # ----------------------------------------------------
+        # Free memory
+        # ----------------------------------------------------
 
         del batch
         del features
@@ -309,16 +507,33 @@ def process_target_source(
     """
     Process one target source.
 
-    Source1 is processed in small chunks.
-    Target source is read in small chunks.
+    Source1:
+        processed in 5,000-row chunks.
+
+    Target:
+        processed in 50,000-row chunks.
+
+    This keeps peak RAM substantially lower than
+    loading the complete test data.
     """
 
     print()
-    print("=" * 70)
     print(
-        f"PROCESSING TARGET SOURCE: {source_label}"
+        "=" * 70
     )
-    print("=" * 70)
+
+    print(
+        f"PROCESSING TARGET SOURCE: "
+        f"{source_label}"
+    )
+
+    print(
+        "=" * 70
+    )
+
+    # --------------------------------------------------------
+    # Count target rows
+    # --------------------------------------------------------
 
     target_rows = count_rows(
         target_file
@@ -329,28 +544,49 @@ def process_target_source(
         f"{target_rows:,}"
     )
 
-    s1_total = len(s1_ids)
+    # --------------------------------------------------------
+    # Source1 information
+    # --------------------------------------------------------
+
+    s1_total = len(
+        s1_ids
+    )
+
+    s1_chunk_number = 0
 
     s1_start = 0
 
+    total_s1_chunks = (
+        s1_total
+        + SOURCE1_CHUNK_SIZE
+        - 1
+    ) // SOURCE1_CHUNK_SIZE
+
+    # --------------------------------------------------------
+    # Process Source1 chunks
+    # --------------------------------------------------------
+
     while s1_start < s1_total:
 
+        s1_chunk_number += 1
+
         s1_end = min(
-            s1_start + SOURCE1_CHUNK_SIZE,
+            s1_start
+            + SOURCE1_CHUNK_SIZE,
             s1_total,
         )
 
         print()
         print(
             f"SOURCE1 CHUNK "
-            f"{s1_start // SOURCE1_CHUNK_SIZE + 1}"
-            f"/"
-            f"{(s1_total + SOURCE1_CHUNK_SIZE - 1) // SOURCE1_CHUNK_SIZE}"
+            f"{s1_chunk_number}/"
+            f"{total_s1_chunks}"
         )
 
         print(
             f"S1 rows: "
-            f"{s1_start:,} - {s1_end - 1:,}"
+            f"{s1_start:,} - "
+            f"{s1_end - 1:,}"
         )
 
         # ----------------------------------------------------
@@ -381,18 +617,35 @@ def process_target_source(
 
         target_start = 0
 
+        target_chunk_number = 0
+
+        total_target_chunks = (
+            target_rows
+            + TARGET_CHUNK_SIZE
+            - 1
+        ) // TARGET_CHUNK_SIZE
+
         while target_start < target_rows:
 
+            target_chunk_number += 1
+
             target_end = min(
-                target_start + TARGET_CHUNK_SIZE,
+                target_start
+                + TARGET_CHUNK_SIZE,
                 target_rows,
             )
 
             print(
                 f"  {source_label} target "
+                f"{target_chunk_number}/"
+                f"{total_target_chunks}: "
                 f"{target_start:,} - "
                 f"{target_end - 1:,}"
             )
+
+            # ------------------------------------------------
+            # Load target chunk
+            # ------------------------------------------------
 
             target_chunk = read_chunk(
                 target_file,
@@ -401,7 +654,7 @@ def process_target_source(
             )
 
             # ------------------------------------------------
-            # Normalize target ONCE
+            # Normalize target
             # ------------------------------------------------
 
             target_chunk = (
@@ -425,7 +678,8 @@ def process_target_source(
             )
 
             block_time = (
-                time.time() - block_start
+                time.time()
+                - block_start
             )
 
             print(
@@ -451,7 +705,9 @@ def process_target_source(
 
             if not candidates.empty:
 
-                prediction_start = time.time()
+                prediction_start = (
+                    time.time()
+                )
 
                 accepted = (
                     predict_candidates(
@@ -469,8 +725,9 @@ def process_target_source(
                 )
 
                 accepted_count = sum(
-                    len(v)
-                    for v in accepted.values()
+                    len(values)
+                    for values
+                    in accepted.values()
                 )
 
                 print(
@@ -478,6 +735,10 @@ def process_target_source(
                     f"{accepted_count:,} "
                     f"({prediction_time:.2f}s)"
                 )
+
+                # ------------------------------------------------
+                # Merge predictions
+                # ------------------------------------------------
 
                 for (
                     s1_id,
@@ -490,8 +751,10 @@ def process_target_source(
                         target_ids
                     )
 
+                del accepted
+
             # ------------------------------------------------
-            # Free memory
+            # Free target memory
             # ------------------------------------------------
 
             del target_chunk
@@ -502,7 +765,7 @@ def process_target_source(
             target_start = target_end
 
         # ----------------------------------------------------
-        # Free S1 chunk
+        # Free Source1 memory
         # ----------------------------------------------------
 
         del df_s1
@@ -522,14 +785,25 @@ def main():
 
     overall_start = time.time()
 
-    print("=" * 70)
+    print(
+        "=" * 70
+    )
+
     print(
         "AMAZON BUSINESS ENTITY RESOLUTION"
     )
+
     print(
         "MEMORY-SAFE TEST PREDICTION PIPELINE"
     )
-    print("=" * 70)
+
+    print(
+        "=" * 70
+    )
+
+    # --------------------------------------------------------
+    # Create output directory
+    # --------------------------------------------------------
 
     os.makedirs(
         OUTPUT_DIR,
@@ -537,13 +811,13 @@ def main():
     )
 
     # --------------------------------------------------------
-    # Threshold
+    # Load threshold
     # --------------------------------------------------------
 
     threshold = load_threshold()
 
     # --------------------------------------------------------
-    # Count Source1
+    # Count Source1 rows
     # --------------------------------------------------------
 
     print()
@@ -572,7 +846,9 @@ def main():
     s1_ids_df = pd.read_csv(
         S1_FILE,
         sep="\t",
-        usecols=["entity_id"],
+        usecols=[
+            "entity_id"
+        ],
         dtype=str,
         keep_default_na=False,
         na_filter=False,
@@ -595,18 +871,19 @@ def main():
     )
 
     # --------------------------------------------------------
-    # Model
+    # Load LightGBM
     # --------------------------------------------------------
 
     model = load_model()
 
     # --------------------------------------------------------
-    # Output initialization
+    # Remove incomplete previous outputs
     # --------------------------------------------------------
 
     if os.path.exists(
         MATCHING_OUTPUT
     ):
+
         os.remove(
             MATCHING_OUTPUT
         )
@@ -614,6 +891,7 @@ def main():
     if os.path.exists(
         CANDIDATE_OUTPUT
     ):
+
         os.remove(
             CANDIDATE_OUTPUT
         )
@@ -627,45 +905,49 @@ def main():
     # Matching dictionary
     # --------------------------------------------------------
 
-    matching_dict = defaultdict(set)
+    matching_dict = defaultdict(
+        set
+    )
 
     candidate_first_write = True
 
-    # --------------------------------------------------------
-    # Source2
-    # --------------------------------------------------------
+    # ========================================================
+    # SOURCE 2
+    # ========================================================
 
     candidate_first_write = (
         process_target_source(
-            "S2",
-            S2_FILE,
-            s1_ids,
-            model,
-            threshold,
-            matching_dict,
-            candidate_first_write,
+            source_label="S2",
+            target_file=S2_FILE,
+            s1_ids=s1_ids,
+            model=model,
+            threshold=threshold,
+            matching_dict=matching_dict,
+            candidate_first_write=
+                candidate_first_write,
         )
     )
 
-    # --------------------------------------------------------
-    # Source3
-    # --------------------------------------------------------
+    # ========================================================
+    # SOURCE 3
+    # ========================================================
 
     candidate_first_write = (
         process_target_source(
-            "S3",
-            S3_FILE,
-            s1_ids,
-            model,
-            threshold,
-            matching_dict,
-            candidate_first_write,
+            source_label="S3",
+            target_file=S3_FILE,
+            s1_ids=s1_ids,
+            model=model,
+            threshold=threshold,
+            matching_dict=matching_dict,
+            candidate_first_write=
+                candidate_first_write,
         )
     )
 
-    # --------------------------------------------------------
-    # Write matching results
-    # --------------------------------------------------------
+    # ========================================================
+    # WRITE MATCHING RESULTS
+    # ========================================================
 
     print()
     print(
@@ -701,9 +983,9 @@ def main():
                 f"{','.join(matched_ids)}\n"
             )
 
-    # --------------------------------------------------------
-    # Statistics
-    # --------------------------------------------------------
+    # ========================================================
+    # FINAL STATISTICS
+    # ========================================================
 
     matched_entities = sum(
         1
@@ -713,14 +995,15 @@ def main():
         )
     )
 
-    total_matches = sum(
-        len(v)
-        for v in matching_dict.values()
-    )
-
     singleton_entities = (
         len(s1_ids)
         - matched_entities
+    )
+
+    total_matches = sum(
+        len(values)
+        for values
+        in matching_dict.values()
     )
 
     elapsed = (
@@ -728,12 +1011,22 @@ def main():
         - overall_start
     )
 
+    # ========================================================
+    # FINAL OUTPUT
+    # ========================================================
+
     print()
-    print("=" * 70)
+    print(
+        "=" * 70
+    )
+
     print(
         "PREDICTION COMPLETE"
     )
-    print("=" * 70)
+
+    print(
+        "=" * 70
+    )
 
     print(
         f"Source1 entities      : "
@@ -772,8 +1065,14 @@ def main():
         f"{elapsed / 3600:.2f} hours"
     )
 
-    print("=" * 70)
+    print(
+        "=" * 70
+    )
 
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
 
 if __name__ == "__main__":
     main()
