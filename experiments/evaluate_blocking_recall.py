@@ -1,6 +1,6 @@
 """
-Correct Ground-Truth Recall Evaluation Script for src/blocking.py
-using the 1,000-row Source 1 sample from train_source1.tsv.
+Evaluation script for testing improved src/blocking.py against ground-truth matches
+for the 1,000-row sample from train_source1.tsv.
 """
 
 import sys
@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 import pandas as pd
 
+sys.stdout.reconfigure(encoding="utf-8")
 sys.stdout.reconfigure(line_buffering=True)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent if "PROJECT_ROOT" not in globals() else PROJECT_ROOT
@@ -16,20 +17,29 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.blocking import generate_candidate_pairs
-from src.normalization import (
-    add_normalized_features,
-    normalize_business_name,
-    get_core_business_name,
-    normalize_address,
-    extract_numbers,
-    extract_postal_code,
-    normalize_country,
-)
+from src.normalization import add_normalized_features
+
+
+# 10 previously shown missed pairs from baseline evaluation
+PREVIOUS_10_MISSED_PAIRS = [
+    ("S1-552720726", "S2-524158368"),  # Pae ZX Chit Limited
+    ("S1-211026051", "S2-160973668"),  # Ariabrix vs Gandhinagar Trading
+    ("S1-823731657", "S3-112268045"),  # clitaxable.com vs CLI Taxable LLC
+    ("S1-436985273", "S3-150259143"),  # cornerpilates.com vs Corner Pilates
+    ("S1-335752330", "S2-897778962"),  # rannabrillcertified.com
+    ("S1-562989120", "S2-358084731"),  # Smt Acp Plus Private
+    ("S1-317952287", "S2-106588037"),  # ಹೈ ಫುಡ್ ಎಲ್ಎಲ್‌ಪಿ (Kannada)
+    ("S1-578641214", "S3-92912454"),   # 5bi-Traders vs Sbi Traders
+    ("S1-630223771", "S3-815538600"),  # ऑल इंटरनेशनल एलएलपी (Hindi)
+    ("S1-578641214", "S2-824570205"),  # Sri sbi traders private private limited
+]
+
+PREVIOUS_BASELINE_CANDIDATES = 5336388
 
 
 def evaluate_blocking_recall():
     print("=======================================================", flush=True)
-    print("Evaluating Blocking Recall on Ground Truth (1,000 S1 Sample)...", flush=True)
+    print("Evaluating Improved src/blocking.py on Ground Truth (1,000 S1 Sample)", flush=True)
     print("=======================================================", flush=True)
 
     train_s1_path = PROJECT_ROOT / "dataset/train/train_source1.tsv"
@@ -84,30 +94,6 @@ def evaluate_blocking_recall():
     df_s1_norm = add_normalized_features(df_s1)
     s1_raw_countries = set(df_s1["country"].fillna("").astype(str).str.strip().unique())
 
-    # Build first token of core name set for S1 records (min len >= 2)
-    s1_core_first_tokens = set()
-    for core in df_s1_norm["business_name_core"]:
-        toks = core.split()
-        if toks and len(toks[0]) >= 2:
-            s1_core_first_tokens.add(toks[0])
-
-    s1_exact_cores = set(c for c in df_s1_norm["business_name_core"] if c and len(c) >= 3)
-    s1_postals = set(p for p in df_s1_norm["postal_code"] if p)
-
-    print(f"S1 Search Keys: {len(s1_core_first_tokens)} core first-tokens, {len(s1_exact_cores)} exact cores, {len(s1_postals)} postals", flush=True)
-
-    def is_potential_candidate(name_str: str, addr_str: str) -> bool:
-        if not name_str or not isinstance(name_str, str):
-            return False
-        words = set(re.findall(r"[a-z0-9]+", name_str.lower()))
-        if words & s1_core_first_tokens:
-            return True
-        if s1_postals:
-            addr_words = set(re.findall(r"[a-z0-9]+", str(addr_str).lower()))
-            if addr_words & s1_postals:
-                return True
-        return False
-
     target_sources = [("S2", train_s2_path, gt_s2_ids), ("S3", train_s3_path, gt_s3_ids)]
     all_generated_pairs = set()
     target_lookup = {}
@@ -127,15 +113,9 @@ def evaluate_blocking_recall():
                 for row_dict in gt_rows.to_dict("records"):
                     target_lookup[row_dict["entity_id"]] = row_dict
 
-            # Fast Country & Token Filter
+            # Country filter
             c_mask = chunk["country"].fillna("").astype(str).str.strip().isin(s1_raw_countries)
-            gt_mask = chunk["entity_id"].isin(target_gt_ids)
-
-            bnames = chunk["business_name"].tolist()
-            baddrs = chunk["business_address"].tolist()
-            cand_mask = [is_potential_candidate(bn, ba) for bn, ba in zip(bnames, baddrs)]
-
-            filtered_chunk = chunk[c_mask & (pd.Series(cand_mask, index=chunk.index) | gt_mask)]
+            filtered_chunk = chunk[c_mask]
 
             if not filtered_chunk.empty:
                 c_pairs = generate_candidate_pairs(df_s1_norm, filtered_chunk)
@@ -144,12 +124,13 @@ def evaluate_blocking_recall():
                         all_generated_pairs.add((getattr(p, "source1_entity_id"), getattr(p, "candidate_entity_id")))
                     chunk_candidates_count += len(c_pairs)
 
-            print(f"  Chunk {chunk_idx+1} processed in {time.time() - t_ch:.2f}s (Filtered {len(filtered_chunk)} rows, Cumulative candidates: {len(all_generated_pairs):,})", flush=True)
+            print(f"  Chunk {chunk_idx+1} processed in {time.time() - t_ch:.2f}s (Cumulative candidates: {len(all_generated_pairs):,})", flush=True)
 
         print(f"Finished {label}: generated {chunk_candidates_count:,} candidates in {time.time() - t_src:.2f}s", flush=True)
 
     total_candidates = len(all_generated_pairs)
     avg_candidates_per_s1 = total_candidates / len(df_s1)
+    added_candidates = total_candidates - PREVIOUS_BASELINE_CANDIDATES
 
     # 3. Compute Metrics
     found_matches = gt_pairs & all_generated_pairs
@@ -159,9 +140,9 @@ def evaluate_blocking_recall():
     missed_count = len(missed_matches)
     blocking_recall = (found_count / total_gt_matches) if total_gt_matches > 0 else 0.0
 
-    # 4. Print Summary Report
+    # 4. Print Exact Required Report
     print("\n=======================================================", flush=True)
-    print("BLOCKING EVALUATION SUMMARY (1,000 S1 RECORDS)", flush=True)
+    print("IMPROVED BLOCKING EVALUATION REPORT", flush=True)
     print("=======================================================", flush=True)
     print(f"1. Total ground-truth matches         : {total_gt_matches}", flush=True)
     print(f"2. Ground-truth matches found        : {found_count}", flush=True)
@@ -169,25 +150,23 @@ def evaluate_blocking_recall():
     print(f"4. Blocking recall                    : {blocking_recall * 100:.2f}% ({found_count}/{total_gt_matches})", flush=True)
     print(f"5. Total candidate pairs generated    : {total_candidates:,}", flush=True)
     print(f"6. Average candidates per S1 entity   : {avg_candidates_per_s1:.2f}", flush=True)
+    print(f"7. Candidates added vs baseline       : {added_candidates:+,} pairs", flush=True)
 
-    # 5. Display 10 Missed Ground-Truth Pairs if any exist
-    if missed_count > 0:
-        print("\n-------------------------------------------------------", flush=True)
-        print("SAMPLE OF 10 MISSED GROUND-TRUTH PAIRS", flush=True)
-        print("-------------------------------------------------------", flush=True)
-        for i, (s1_id, tid) in enumerate(list(missed_matches)[:10], 1):
-            s1_info = s1_lookup.get(s1_id, {})
-            t_info = target_lookup.get(tid, {})
+    # 8. Check Status of 10 Previously Shown Missed Pairs
+    print("\n-------------------------------------------------------", flush=True)
+    print("STATUS OF 10 PREVIOUSLY SHOWN MISSED PAIRS", flush=True)
+    print("-------------------------------------------------------", flush=True)
+    newly_found_count = 0
+    for idx, (s1_id, tid) in enumerate(PREVIOUS_10_MISSED_PAIRS, 1):
+        is_found = (s1_id, tid) in all_generated_pairs
+        status_str = "RECOVERED (FOUND)" if is_found else "STILL MISSED"
+        if is_found:
+            newly_found_count += 1
+        s1_info = s1_lookup.get(s1_id, {})
+        t_info = target_lookup.get(tid, {})
+        print(f"[{idx}] {status_str} -> S1: '{s1_info.get('business_name', '')}' <==> Target: '{t_info.get('business_name', '')}' ({tid})", flush=True)
 
-            print(f"\n[Missed Pair {i}]", flush=True)
-            print(f"  S1 ID          : {s1_id}", flush=True)
-            print(f"  S1 Name        : {s1_info.get('business_name', '')}", flush=True)
-            print(f"  S1 Address     : {s1_info.get('business_address', '')}", flush=True)
-            print(f"  S1 Country     : {s1_info.get('country', '')}", flush=True)
-            print(f"  Target ID ({tid[:2]}) : {tid}", flush=True)
-            print(f"  Target Name    : {t_info.get('business_name', '')}", flush=True)
-            print(f"  Target Address : {t_info.get('business_address', '')}", flush=True)
-            print(f"  Target Country : {t_info.get('country', '')}", flush=True)
+    print(f"\nSummary of previously missed 10 pairs: {newly_found_count}/10 now recovered!", flush=True)
 
 
 if __name__ == "__main__":
